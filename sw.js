@@ -1,10 +1,11 @@
 /* Magabi Notes — service worker
-   - Arquivos do app (página): busca na rede primeiro (para
-     receber atualizações) e, sem internet ou com rede lenta, usa a cópia salva.
+   - Página: busca a versão nova na rede, sem usar a cópia velha do navegador.
+     Se a rede demorar ou faltar, abre a cópia salva, mas continua baixando
+     em segundo plano: a versão nova fica salva e o app avisa para atualizar.
    - Ícones: cópia salva primeiro.
    - Fontes do Google: cópia salva e atualização em segundo plano,
      para o app abrir também sem internet. */
-const VERSAO = 'magabinotes-v2';
+const VERSAO = 'magabinotes-v3';
 const ARQUIVOS = [
   './',
   './index.html',
@@ -49,6 +50,31 @@ function redePrimeiro(req, chaveCache, reserva) {
     .catch(() => caches.match(chaveCache).then(r => r || (reserva ? caches.match(reserva) : undefined)));
 }
 
+function pagina(event) {
+  let usouCopia = false;
+  const rede = fetch(event.request.url, { cache: 'no-cache', credentials: 'same-origin' });
+  const atualizar = rede.then(async resp => {
+    if (!resp || !resp.ok) return;
+    const cache = await caches.open(VERSAO);
+    const antigo = await cache.match('./index.html');
+    const antigoTxt = antigo ? await antigo.text() : null;
+    const novoTxt = await resp.clone().text();
+    await cache.put('./index.html', resp.clone());
+    if (usouCopia && antigoTxt !== null && antigoTxt !== novoTxt) {
+      const janelas = await self.clients.matchAll({ type: 'window' });
+      janelas.forEach(j => j.postMessage('nova-versao'));
+    }
+  }).catch(() => {});
+  event.waitUntil(atualizar);
+  return comTempoLimite(rede.then(r => { if (!r.ok) throw new Error('falha'); return r.clone(); }), 4000)
+    .catch(() => {
+      usouCopia = true;
+      return caches.match('./index.html')
+        .then(r => r || caches.match('./'))
+        .then(r => r || rede.then(x => x.clone()));
+    });
+}
+
 function salvoEAtualiza(req) {
   return caches.open(VERSAO).then(cache =>
     cache.match(req).then(salvo => {
@@ -68,7 +94,7 @@ self.addEventListener('fetch', event => {
 
   // Página do app
   if (req.mode === 'navigate') {
-    event.respondWith(redePrimeiro(req, './index.html', './'));
+    event.respondWith(pagina(event));
     return;
   }
 
